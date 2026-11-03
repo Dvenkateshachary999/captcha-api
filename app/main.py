@@ -1,94 +1,72 @@
 
-import time
-
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+import time
 
 from app.captcha import generate_captcha, captcha_store
 
-# Create FastAPI application
-app = FastAPI(title="CAPTCHA API")
+app = FastAPI(title="Question Based CAPTCHA API")
 
 
-# Request model
-class CaptchaVerifyRequest(BaseModel):
+class VerifyRequest(BaseModel):
     captcha_id: str
     answer: str
 
 
-# Home API
 @app.get("/")
 def home():
     return {
-        "message": "Welcome to CAPTCHA API",
+        "message": "Welcome to Question Based CAPTCHA API",
         "status": "Running"
     }
 
 
-# Health Check API
 @app.get("/health")
-def health_check():
-    return {
-        "status": "healthy"
-    }
+def health():
+    return {"status": "healthy"}
 
 
-# Generate CAPTCHA API
 @app.get("/captcha/generate")
-def captcha_generate():
-    captcha_id, image_bytes = generate_captcha()
-
-    return StreamingResponse(
-        image_bytes,
-        media_type="image/png",
-        headers={"X-Captcha-ID": captcha_id}
-    )
+def create_captcha():
+    return generate_captcha()
 
 
-# Verify CAPTCHA API
 @app.post("/captcha/verify")
-def captcha_verify(request: CaptchaVerifyRequest):
+def verify_captcha(request: VerifyRequest):
 
-    captcha_data = captcha_store.get(request.captcha_id)
+    captcha = captcha_store.get(request.captcha_id)
 
-    if captcha_data is None:
+    if not captcha:
         raise HTTPException(
             status_code=404,
-            detail="Invalid or already used CAPTCHA ID"
+            detail="Invalid CAPTCHA ID"
         )
 
-    # Check whether CAPTCHA has expired
-    if time.time() - captcha_data["created_at"] > 120:
-        captcha_store.pop(request.captcha_id, None)
-
+    if time.time() - captcha["created_at"] > 120:
+        del captcha_store[request.captcha_id]
         raise HTTPException(
-            status_code=400,
-            detail="CAPTCHA has expired. Please generate a new CAPTCHA."
+            status_code=410,
+            detail="CAPTCHA expired. Generate a new one."
         )
 
-    # Verify CAPTCHA answer
-    if captcha_data["answer"] == request.answer.strip().upper():
-        captcha_store.pop(request.captcha_id, None)
+    if captcha["attempts"] >= 3:
+        del captcha_store[request.captcha_id]
+        raise HTTPException(
+            status_code=429,
+            detail="Maximum attempts exceeded"
+        )
 
+    if request.answer.strip() == captcha["answer"]:
+        del captcha_store[request.captcha_id]
         return {
             "success": True,
             "message": "CAPTCHA verified successfully"
         }
 
-    # Increase incorrect attempt count
-    captcha_data["attempts"] += 1
-
-    # Invalidate after 3 incorrect attempts
-    if captcha_data["attempts"] >= 3:
-        captcha_store.pop(request.captcha_id, None)
-
-        return {
-            "success": False,
-            "message": "Maximum 3 incorrect attempts reached. Please generate a new CAPTCHA."
-        }
+    captcha["attempts"] += 1
 
     return {
         "success": False,
-        "message": f"Incorrect CAPTCHA. Attempts remaining: {3 - captcha_data['attempts']}"
+        "message": "Incorrect answer",
+        "attempts_remaining": 3 - captcha["attempts"]
     }
